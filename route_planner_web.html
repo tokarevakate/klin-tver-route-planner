@@ -19,7 +19,7 @@ footer{font-size:.85rem;margin-top:22px}.error{color:#932b23}
 .route-drawing polyline{fill:none;stroke:#17694f;stroke-width:3;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}
 .route-drawing circle{fill:#12634c;stroke:white;stroke-width:2}
 .route-drawing .finish{fill:#a04e30}
-#city-results tr:first-child td{background:#e2f2e9}
+#city-tolls:not(:empty){margin-top:12px}
 </style>
 </head>
 <body>
@@ -32,15 +32,27 @@ footer{font-size:.85rem;margin-top:22px}.error{color:#932b23}
 <form id="city-settings" class="card">
   <h2>Маршрут между городами России</h2>
   <div class="fields">
-    <label>Откуда<input name="origin" list="russian-cities" placeholder="Клин" maxlength="200" required></label>
-    <label>Куда<input name="destination" list="russian-cities" placeholder="Тверь" maxlength="200" required></label>
+    <label>Откуда<input name="origin" list="russian-cities" placeholder="Казань" maxlength="200" required></label>
+    <label>Куда<input name="destination" list="russian-cities" placeholder="Москва" maxlength="200" required></label>
     <label>Критерий<select name="objective">
+      <option value="cost">Минимум общих расходов</option>
+      <option value="score">Расходы с оценкой времени</option>
       <option value="duration">Минимум времени в пути</option>
       <option value="distance">Минимум расстояния</option>
       <option value="fuel">Минимум расчётного топлива</option>
     </select></label>
   </div>
+  <div class="fields">
+    <label>Выезд с, МСК<input name="start" type="time" value="06:00" required></label>
+    <label>Выезд до, МСК<input name="end" type="time" value="09:00" required></label>
+    <label>Прибыть до, МСК<input name="deadline" type="time"></label>
+    <label>Топливо, ₽/л<input name="price" type="number" min="0.01" max="1000" step="0.01" value="65" required></label>
+    <label>Оценка времени, ₽/ч<input name="valueOfTime" type="number" min="0" max="10000" step="1" value="400" required></label>
+    <label>Задержка в час пик, мин/100 км<input name="peak" type="number" min="0" max="120" step="1" value="10" required></label>
+  </div>
+  <p class="muted">Модельные часы пик по МСК: 07:00–09:30 и 16:30–19:30. Чтобы сравнить варианты без задержки, укажите 0. Срок прибытия задаётся на день выезда.</p>
   <datalist id="russian-cities"></datalist>
+  <div id="city-tolls" class="fields"></div>
   <button type="submit">Построить маршрут</button>
   <p id="city-status" role="status"></p>
   <small>Введите названия или выберите города из подсказок. Внешний сервис получает координаты центров городов при расчёте.</small>
@@ -48,16 +60,25 @@ footer{font-size:.85rem;margin-top:22px}.error{color:#932b23}
 <section id="city-result" class="card" aria-live="polite" hidden>
   <h2 id="city-result-title"></h2>
   <p id="city-result-note" class="muted"></p>
+  <p id="city-result-best" role="status"></p>
   <div class="scroll"><table>
-    <thead><tr><th>Вариант</th><th>Расстояние, км</th><th>В пути</th><th>Топливо, л (оценка)</th></tr></thead>
+    <thead><tr><th>Маршрут</th><th>Выезд</th><th>Прибытие</th><th>В пути, мин</th><th>Км</th><th>Топливо, л</th><th>Топливо, ₽</th><th>Дорога, ₽</th><th>Итого, ₽</th><th>Со временем, ₽</th></tr></thead>
     <tbody id="city-results"></tbody>
   </table></div>
+  <details>
+    <summary>Расчёты для всех выездов с шагом 15 минут</summary>
+    <div class="scroll"><table>
+      <thead><tr><th>Маршрут</th><th>Выезд</th><th>Прибытие</th><th>В пути, мин</th><th>Км</th><th>Топливо, л</th><th>Топливо, ₽</th><th>Дорога, ₽</th><th>Итого, ₽</th><th>Со временем, ₽</th></tr></thead>
+      <tbody id="city-all"></tbody>
+    </table></div>
+  </details>
+  <label>Вариант на схеме<select id="city-map-choice"></select></label>
   <figure>
     <svg id="city-drawing" class="route-drawing" viewBox="0 0 600 260" role="img" aria-label="Схема выбранного автомобильного маршрута"></svg>
-    <figcaption class="muted">Схема выбранного маршрута. Зелёная точка — старт, коричневая — финиш.</figcaption>
+    <figcaption class="muted">Схема маршрута. Зелёная точка — старт, коричневая — финиш.</figcaption>
   </figure>
-  <small>Время рассчитано без текущих пробок. Расход оценён по средней скорости на ровной дороге. Тарифы и время выезда здесь не учитываются.</small>
-  <p><small>Маршруты: <a href="https://routing.openstreetmap.de/about.html">OSRM / FOSSGIS</a> ·
+  <small>Расход оценён по средней скорости на ровной дороге и с учётом холостого хода во время заданной задержки. Прочерк означает неизвестную стоимость.</small>
+  <p><small>Маршруты <a href="https://valhalla.openstreetmap.de/">Valhalla</a> / <a href="https://routing.openstreetmap.de/about.html">OSRM</a> ·
     <a href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a> ·
     <a href="https://www.openstreetmap.org/fixthemap">Исправить карту</a> ·
     <a href="https://github.com/hflabs/city">Справочник DaData / HFLabs</a></small></p>
@@ -172,38 +193,72 @@ function drawRoute(geometry) {
   svg.replaceChildren(line, ...endpoints);
 }
 
-function showCityRoutes({origin, destination, routes}) {
+const tollFields = document.getElementById("city-tolls");
+const mapChoice = document.getElementById("city-map-choice");
+let lastPair = "";
+let displayedCandidates = [];
+
+function showCityRoutes({origin, destination, study, candidates, provider, missingTolls}) {
+  const {trips, perRoute, best, earliest} = study;
+  const selected = best === null ? null : trips[best];
+  const counts = candidates.length === 1 ? "Найден один дорожный вариант." : "Найдено вариантов: " + candidates.length + ".";
+  const missing = missingTolls
+    ? " Для сравнения всех вариантов по стоимости укажите недостающие тарифы и повторите расчёт."
+    : "";
   document.getElementById("city-result-title").textContent = origin + " → " + destination;
-  document.getElementById("city-result-note").textContent = routes.length === 1
-    ? "Дорожный сервис вернул один вариант."
-    : "Первый вариант лучший по выбранному критерию среди найденных маршрутов.";
-  const rows = routes.map((route, index) => {
-    const row = document.createElement("tr");
-    const minutes = Math.round(route.duration);
-    const duration = minutes < 60 ? minutes + " мин" : Math.floor(minutes / 60) + " ч " + minutes % 60 + " мин";
-    const values = [index === 0 ? "Выбранный" : "Альтернатива " + index,
-      number(route.distance, 1), duration, number(route.fuel, 2)];
-    for (const value of values) {
-      const cell = document.createElement("td");
-      cell.textContent = value;
-      row.append(cell);
+  document.getElementById("city-result-note").textContent = provider + " · " + counts + missing;
+  document.getElementById("city-result-best").textContent = selected
+    ? selected.route.name + " · выезд " + selected.departure + " · прибытие " + selected.arrival
+    : trips.some(trip => trip.feasible)
+      ? "Введите тарифы, чтобы выбрать маршрут по стоимости."
+      : "К указанному сроку маршрутов нет. Самое раннее прибытие — " + earliest + ".";
+  renderRows("city-results", perRoute.map(index => trips[index]), selected);
+  renderRows("city-all", trips, selected);
+
+  const inputs = candidates.map(candidate => {
+    const label = document.createElement("label");
+    label.textContent = candidate.name + " · проезд, ₽";
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "0";
+    input.max = "100000";
+    input.step = "0.01";
+    input.dataset.route = candidate.id;
+    input.placeholder = "Введите тариф";
+    input.value = candidate.toll ?? "";
+    label.append(input);
+    if (candidate.paidRoads.length) {
+      const roads = document.createElement("small");
+      roads.textContent = candidate.paidRoads.join(", ");
+      label.append(roads);
     }
-    return row;
+    return label;
   });
-  document.getElementById("city-results").replaceChildren(...rows);
-  drawRoute(routes[0].geometry);
+  tollFields.replaceChildren(...inputs);
+  displayedCandidates = candidates;
+  mapChoice.replaceChildren(...candidates.map((candidate, index) => new Option(candidate.name, index)));
+  mapChoice.selectedIndex = Math.max(0, candidates.findIndex(candidate => candidate.name === selected?.route.name));
+  drawRoute(candidates[mapChoice.selectedIndex].geometry);
   cityResult.hidden = false;
 }
 
+mapChoice.addEventListener("change", () => drawRoute(displayedCandidates[mapChoice.selectedIndex].geometry));
+
 cityForm.addEventListener("submit", async event => {
   event.preventDefault();
-  const button = event.submitter;
+  const button = cityForm.querySelector("button[type=submit]");
   button.disabled = true;
   cityResult.hidden = true;
-  cityStatus.textContent = "Ищем маршрут…";
+  cityStatus.textContent = "Ищем маршруты и сравниваем время выезда…";
+  const params = new URLSearchParams(new FormData(cityForm));
+  const pair = JSON.stringify([params.get("origin").trim().toLowerCase(), params.get("destination").trim().toLowerCase()]);
+  if (pair !== lastPair) tollFields.replaceChildren();
+  const tolls = Object.fromEntries([...tollFields.querySelectorAll("input")]
+    .filter(input => input.value !== "").map(input => [input.dataset.route, input.value]));
+  params.set("tolls", JSON.stringify(tolls));
   try {
-    const params = new URLSearchParams(new FormData(cityForm));
-    showCityRoutes(await cityRequest("/api/city-route?" + params));
+    showCityRoutes(await cityRequest("/api/city-compare?" + params));
+    lastPair = pair;
     cityStatus.textContent = "";
   } catch (error) {
     cityStatus.textContent = error.message;
@@ -213,6 +268,8 @@ cityForm.addEventListener("submit", async event => {
 });
 loadCities();
 
+const money = value => value === null ? "—" : number(value, 2);
+
 function renderRows(id, trips, best) {
   const body = document.getElementById(id);
   body.replaceChildren(...trips.map(trip => {
@@ -220,8 +277,8 @@ function renderRows(id, trips, best) {
     row.className = trip === best ? "best" : trip.feasible ? "" : "late";
     const values = [
       trip.route.name + (trip.feasible ? "" : " · опоздание"), trip.departure,
-      trip.arrival, number(trip.duration, 1), number(trip.km), number(trip.fuel, 2),
-      number(trip.fuelCost, 2), number(trip.route.toll), number(trip.cost, 2), number(trip.score, 2)
+      trip.arrival, number(trip.duration, 1), number(trip.km, Number.isInteger(trip.km) ? 0 : 1), number(trip.fuel, 2),
+      number(trip.fuelCost, 2), money(trip.route.toll), money(trip.cost), money(trip.score)
     ];
     values.forEach((value, index) => {
       const cell = document.createElement(index ? "td" : "th");

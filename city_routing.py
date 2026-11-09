@@ -3,6 +3,7 @@
 import csv
 from dataclasses import dataclass
 from functools import lru_cache
+import hashlib
 import json
 from math import isfinite
 import os
@@ -134,3 +135,104 @@ def city_plan(origin: str, destination: str, objective: str, consumption) -> dic
                         "geometry": route["geometry"]})
     options.sort(key=lambda route: (route[objective], route["duration"], route["distance"]))
     return {"origin": start.label, "destination": finish.label, "routes": options}
+
+
+VALHALLA_URL = "https://valhalla1.openstreetmap.de/route"
+
+
+def decode_shape(shape: str) -> list[list[float]]:
+    """Valhalla кодирует широту и долготу с точностью 10⁻⁶ градуса."""
+    coordinates = []
+    totals = [0, 0]
+    index = 0
+    while index < len(shape):
+        for axis in range(2):
+            value = shift = 0
+            while True:
+                chunk = ord(shape[index]) - 63
+                index += 1
+                if not 0 <= chunk <= 63 or shift > 30:
+                    raise ValueError("invalid polyline")
+                value |= (chunk & 31) << shift
+                if chunk < 32:
+                    break
+                shift += 5
+            totals[axis] += ~(value >> 1) if value & 1 else value >> 1
+        coordinates.append([totals[1] / 1e6, totals[0] / 1e6])
+    return coordinates
+
+
+def valhalla_routes(start: City, finish: City, preference: dict) -> list[dict]:
+    global last_request
+    query = {
+        "locations": [{"lat": city.lat, "lon": city.lon} for city in (start, finish)],
+        "costing": "auto", "costing_options": {"auto": preference},
+        "units": "kilometers", "alternates": 2, "directions_type": "maneuvers",
+    }
+    request = Request(VALHALLA_URL, data=json.dumps(query).encode(), headers={
+        "Content-Type": "application/json",
+        "X-Client-Id": "tokarevakate-klin-tver-route-planner",
+        "User-Agent": "KlinTverRoutePlanner/2.1 (+https://github.com/tokarevakate/klin-tver-route-planner)",
+    })
+    try:
+        with OSRM_LOCK:
+            sleep(max(0, 1 - (monotonic() - last_request)))
+            last_request = monotonic()
+            try:
+                response = urlopen(request, timeout=20)
+            except HTTPError as exc:
+                if exc.code != 400:
+                    exc.close()
+                    raise
+                response = exc
+            with response:
+                payload = json.loads(response.read(8_000_000))
+        if payload.get("error_code") in {170, 171, 442, 443}:
+            return []
+        trips = [payload["trip"], *(item["trip"] for item in payload.get("alternates", []))]
+        routes = []
+        for trip in trips:
+            summary = trip["summary"]
+            legs = trip["legs"]
+            km, seconds = float(summary["length"]), float(summary["time"])
+            geometry = [point for leg in legs for point in decode_shape(leg["shape"])]
+            if not (isfinite(km) and km > 0 and isfinite(seconds) and seconds > 0 and len(geometry) >= 2):
+                raise ValueError("invalid route")
+            flags = [leg["summary"].get("has_toll") for leg in legs]
+            toll = True if True in flags else False if all(flag is False for flag in flags) else None
+            paid_roads = list(dict.fromkeys(
+                name for leg in legs for maneuver in leg.get("maneuvers", [])
+                if maneuver.get("toll")
+                for name in maneuver.get("street_names", []) if isinstance(name, str)
+            ))
+            routes.append({"distance": km * 1000, "duration": seconds, "geometry": geometry,
+                           "toll_road": toll, "paid_roads": paid_roads, "provider": "Valhalla"})
+        return routes
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError) as exc:
+        raise RoutingUnavailable("Не удалось получить маршруты Valhalla.") from exc
+
+
+@lru_cache(maxsize=32)
+def discover_routes(start: City, finish: City, osrm_url: str) -> tuple[dict, ...]:
+    try:
+        routes = valhalla_routes(start, finish, {})
+    except RoutingUnavailable:
+        routes = []
+    if routes:
+        flags = {route["toll_road"] for route in routes}
+        if not {False, True} <= flags:
+            preference = {"use_tolls": 1} if False in flags else {"exclude_tolls": True}
+            try:
+                routes.extend(valhalla_routes(start, finish, preference))
+            except RoutingUnavailable:
+                pass
+    else:
+        routes = [dict(route, toll_road=None, provider="OSRM")
+                  for route in routes_for(osrm_url, start, finish)]
+
+    unique = {}
+    for route in routes:
+        shape = json.dumps(route["geometry"], separators=(",", ":"))
+        key = hashlib.sha256(shape.encode()).hexdigest()[:16]
+        unique.setdefault(key, dict(route, id=key))
+    return tuple(unique.values())

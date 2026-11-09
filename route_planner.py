@@ -4,6 +4,7 @@ import argparse
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from math import ceil, isfinite
 from pathlib import Path
 import re
@@ -12,13 +13,14 @@ import threading
 from urllib.parse import parse_qs, urlsplit
 import webbrowser
 
-from city_routing import RoutingUnavailable, cities, city_plan
+from city_routing import OSRM_URL, RoutingUnavailable, cities, city_plan, discover_routes, find_city
 
 MINUTES_PER_DAY = 1440
 IDLE_LITRES_PER_HOUR = 0.6
 EPSILON = 1e-8
 OBJECTIVES = {
     "cost": "прямые расходы",
+    "distance": "расстояние",
     "fuel": "расход топлива",
     "duration": "время в пути",
     "score": "расходы с оценкой времени",
@@ -28,9 +30,9 @@ OBJECTIVES = {
 @dataclass(frozen=True)
 class Segment:
     name: str
-    km: int
+    km: float
     grade: float
-    radius: int
+    radius: int | None
     # Пары (км/ч, мин задержки на км) вне пика, утром и вечером.
     rates: tuple[tuple[float, float], ...]
     paid: bool = False
@@ -39,7 +41,7 @@ class Segment:
 @dataclass(frozen=True)
 class Route:
     name: str
-    toll: int
+    toll: float | None
     segments: tuple[Segment, ...]
 
 
@@ -48,18 +50,18 @@ class Trip:
     route: Route
     departure: int
     arrival: float
-    km: int
+    km: float
     fuel: float
     fuel_cost: float
-    score: float
+    score: float | None
 
     @property
     def duration(self) -> float:
         return self.arrival - self.departure
 
     @property
-    def cost(self) -> float:
-        return self.fuel_cost + self.route.toll
+    def cost(self) -> float | None:
+        return None if self.route.toll is None else self.fuel_cost + self.route.toll
 
 
 FREE_WEST = Segment("М-10: Клин — Завидово", 31, 0.45, 850,
@@ -116,17 +118,21 @@ def simulate(route: Route, departure: int, price: float, value_of_time: float) -
                 available_km = (until - time) / minutes_per_km
                 driven = min(remaining, available_km)
                 time = until if available_km <= remaining else time + driven * minutes_per_km
-                fuel += driven * (consumption(speed, grade, segment.radius) / 100
+                fuel += driven * (consumption(min(130, max(10, speed)), grade, segment.radius) / 100
                                   + IDLE_LITRES_PER_HOUR * idle / 60)
                 remaining -= driven
 
     fuel_cost = fuel * price
-    score = fuel_cost + route.toll + value_of_time * (time - departure) / 60
+    score = (None if route.toll is None
+             else fuel_cost + route.toll + value_of_time * (time - departure) / 60)
     return Trip(route, departure, time, sum(s.km for s in route.segments), fuel, fuel_cost, score)
 
 
 def ranking(trip: Trip, objective: str) -> tuple[float, ...]:
-    return getattr(trip, objective), trip.cost, trip.fuel, trip.arrival, trip.departure
+    metric = trip.km if objective == "distance" else getattr(trip, objective)
+    cost = trip.cost
+    return (float("inf") if metric is None else metric,
+            float("inf") if cost is None else cost, trip.fuel, trip.arrival, trip.departure)
 
 
 def parse_time(value: str) -> int:
@@ -171,7 +177,8 @@ def is_feasible(trip: Trip, deadline: int | None) -> bool:
 
 
 def plan(start: int, end: int, deadline: int | None, price: float,
-         value_of_time: float, objective: str) -> tuple[list[Trip], list[Trip], Trip | None]:
+         value_of_time: float, objective: str,
+         routes: tuple[Route, ...] = ROUTES) -> tuple[list[Trip], list[Trip], Trip | None]:
     if start > end:
         raise ValueError("Конец окна выезда должен быть не раньше начала.")
     if deadline is not None and deadline < start:
@@ -185,27 +192,32 @@ def plan(start: int, end: int, deadline: int | None, price: float,
 
     departures = [*range(start, end, 15), end]
     trips = [simulate(route, departure, price, value_of_time)
-             for departure in departures for route in ROUTES]
+             for departure in departures for route in routes]
     ranked = sorted((trip for trip in trips if is_feasible(trip, deadline)),
                     key=lambda trip: ranking(trip, objective))
     per_route = []
-    for route in ROUTES:
+    for route in routes:
         best = next((trip for trip in ranked if trip.route == route), None)
         if best is None:
             best = min((trip for trip in trips if trip.route == route),
                        key=lambda trip: trip.arrival)
         per_route.append(best)
-    return trips, per_route, ranked[0] if ranked else None
+    best = next((trip for trip in ranked if objective not in {"cost", "score"} or trip.cost is not None), None)
+    return trips, per_route, best
 
 
 def web_plan(query: str) -> dict:
     fields = parse_qs(query, keep_blank_values=True, max_num_fields=6)
+    return study_plan(fields, ROUTES)
+
+
+def study_plan(fields: dict[str, list[str]], routes: tuple[Route, ...]) -> dict:
     start = parse_time(fields["start"][0])
     end = parse_time(fields["end"][0])
     deadline_text = fields["deadline"][0]
     deadline = parse_time(deadline_text) if deadline_text else None
     trips, per_route, best = plan(start, end, deadline, float(fields["price"][0]),
-                                  float(fields["valueOfTime"][0]), fields["objective"][0])
+                                  float(fields["valueOfTime"][0]), fields["objective"][0], routes)
     return {
         "trips": [{
             "route": {"name": trip.route.name, "toll": trip.route.toll},
@@ -225,6 +237,44 @@ def web_plan(query: str) -> dict:
         "legs": [{"name": segment.name, "km": segment.km, "paid": segment.paid}
                  for segment in best.route.segments] if best is not None else [],
     }
+
+
+def compare_cities(query: str) -> dict:
+    fields = parse_qs(query, keep_blank_values=True, max_num_fields=10)
+    start, finish = (find_city(fields[key][0]) for key in ("origin", "destination"))
+    if start == finish:
+        raise ValueError("Выберите два разных города.")
+    peak = float(fields["peak"][0])
+    if not isfinite(peak) or not 0 <= peak <= 120:
+        raise ValueError("Задержка в час пик должна быть от 0 до 120 мин на 100 км.")
+
+    candidates = discover_routes(start, finish, os.environ.get("ROUTE_PLANNER_OSRM_URL", OSRM_URL))
+    tolls = json.loads(fields.get("tolls", ["{}"])[0])
+    if not isinstance(tolls, dict) or set(tolls) - {candidate["id"] for candidate in candidates}:
+        raise ValueError("Список маршрутов изменился. Запустите поиск заново.")
+    routes = []
+    for index, candidate in enumerate(candidates, 1):
+        kind = candidate["toll_road"]
+        name = f"Вариант {index} · " + ("с платными участками" if kind is True
+                                     else "без платных участков" if kind is False
+                                     else "платность не определена")
+        amount = tolls.get(candidate["id"])
+        toll = float(amount) if amount is not None else (0 if kind is False else None)
+        if toll is not None and (not isfinite(toll) or not 0 <= toll <= 100000):
+            raise ValueError("Плата за проезд должна быть от 0 до 100 000 ₽.")
+        km = candidate["distance"] / 1000
+        speed = km * 3600 / candidate["duration"]
+        rates = ((speed, 0), (speed, peak / 100), (speed, peak / 100))
+        routes.append(Route(name, toll, (Segment(name, km, 0, None, rates, paid=kind is True),)))
+
+    result = study_plan(fields, tuple(routes))
+    return {"origin": start.label, "destination": finish.label, "study": result,
+            "candidates": [{"id": candidate["id"], "name": route.name,
+                            "toll": route.toll, "geometry": candidate["geometry"],
+                            "paidRoads": candidate.get("paid_roads", [])}
+                           for candidate, route in zip(candidates, routes)],
+            "provider": candidates[0]["provider"],
+            "missingTolls": sum(route.toll is None for route in routes)}
 
 
 def serve_web() -> None:
@@ -247,12 +297,14 @@ def serve_web() -> None:
             if target.path == "/":
                 self.respond(200, "text/html; charset=utf-8", page)
                 return
-            if target.path not in {"/api/plan", "/api/cities", "/api/city-route"}:
+            if target.path not in {"/api/plan", "/api/cities", "/api/city-route", "/api/city-compare"}:
                 self.send_error(404)
                 return
             try:
                 if target.path == "/api/cities":
                     result = sorted(city.label for city in cities())
+                elif target.path == "/api/city-compare":
+                    result = compare_cities(target.query)
                 elif target.path == "/api/city-route":
                     fields = parse_qs(target.query, keep_blank_values=True, max_num_fields=3)
                     result = city_plan(fields["origin"][0], fields["destination"][0],
