@@ -57,6 +57,8 @@ def find_city(value: str) -> City:
     if not value.strip() or len(value) > 200:
         raise ValueError("Введите название города из справочника.")
     name = normalize(value)
+    name = {"мск": "москва", "спб": "санкт-петербург", "питер": "санкт-петербург",
+            "санкт петербург": "санкт-петербург"}.get(name, name)
     matches = [city for city in cities()
                if name in (normalize(city.name), normalize(city.label))]
     if not matches:
@@ -169,8 +171,9 @@ def valhalla_routes(start: City, finish: City, preference: dict) -> list[dict]:
         "costing": "auto", "costing_options": {"auto": preference},
         "units": "kilometers", "alternates": 2, "directions_type": "maneuvers",
     }
-    request = Request(VALHALLA_URL, data=json.dumps(query).encode(), headers={
-        "Content-Type": "application/json",
+    params = urlencode({"json": json.dumps(query, separators=(",", ":"))})
+    request = Request(f"{VALHALLA_URL}?{params}", headers={
+        "Accept": "application/json",
         "X-Client-Id": "tokarevakate-klin-tver-route-planner",
         "User-Agent": "KlinTverRoutePlanner/2.1 (+https://github.com/tokarevakate/klin-tver-route-planner)",
     })
@@ -220,12 +223,19 @@ def discover_routes(start: City, finish: City, osrm_url: str) -> tuple[dict, ...
         routes = []
     if routes:
         flags = {route["toll_road"] for route in routes}
-        if not {False, True} <= flags:
-            preference = {"use_tolls": 1} if False in flags else {"exclude_tolls": True}
+        preferences = []
+        if False not in flags:
+            preferences.append({"exclude_tolls": True})
+        if True not in flags:
+            preferences.append({"use_tolls": 1})
+        preferences.append({"use_highways": 0.1, "use_tolls": 0.25})
+        for preference in preferences:
+            if "use_highways" in preference and len({json.dumps(route["geometry"]) for route in routes}) >= 3:
+                break
             try:
                 routes.extend(valhalla_routes(start, finish, preference))
             except RoutingUnavailable:
-                pass
+                continue
     else:
         routes = [dict(route, toll_road=None, provider="OSRM")
                   for route in routes_for(osrm_url, start, finish)]

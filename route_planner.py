@@ -1,7 +1,7 @@
 """Учебная оптимизация маршрута и времени выезда из Клина в Тверь."""
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -84,6 +84,62 @@ ROUTES = (
     Route("М-10 → М-11", 140, (FREE_WEST, ZAVIDOVO_ACCESS, PAID_EAST, TVER_ACCESS)),
     Route("М-11", 370, (KLIN_ACCESS, PAID_WEST, PAID_EAST, TVER_ACCESS)),
 )
+
+
+# Учебные расстояния, скорости, уклоны и задержки. Плата за указанные
+# въезды и съезды берётся из опубликованных таблиц категории I.
+MOSCOW_ACCESS = Segment("Москва · подъезд к М-11", 25, 0.15, 800,
+                        ((55, 0.1), (40, 0.25), (37, 0.30)))
+MOSCOW_M10 = Segment("М-10 · Москва — Солнечногорск", 68, 0.25, 900,
+                     ((65, 0.12), (48, 0.27), (46, 0.32)))
+NORTH_M10 = Segment("М-10 · Солнечногорск — Санкт-Петербург через Тверь и Великий Новгород",
+                    634, 0.25, 1200, ((75, 0.07), (60, 0.14), (59, 0.16)))
+MOSCOW_M11 = Segment("М-11 · км 15–58", 43, 0.12, 2300,
+                     ((95, 0.015), (86, 0.03), (85, 0.04)), paid=True)
+NORTH_M11 = Segment("М-11 · км 58–684", 626, 0.15, 2500,
+                    ((98, 0.005), (96, 0.01), (94, 0.01)), paid=True)
+SPB_ACCESS = Segment("Санкт-Петербург · КАД и городские дороги", 23, 0.12, 1000,
+                     ((55, 0.09), (43, 0.21), (40, 0.27)))
+
+KAZAN_FREE = Segment("М-7 · Казань — Владимир через Чебоксары и Нижний Новгород",
+                     630, 0.4, 1000, ((77, 0.08), (65, 0.15), (63, 0.19)))
+VLADIMIR_FREE = Segment("М-7 · Владимир — Москва", 190, 0.3, 850,
+                        ((70, 0.12), (55, 0.28), (52, 0.32)))
+VLADIMIR_LINK = Segment("Владимир · подъезд к М-12", 12, 0.3, 750,
+                        ((60, 0.08), (48, 0.19), (48, 0.19)))
+KAZAN_LINK = Segment("Казань · подъезд к М-12 по Р-239", 29, 0.25, 850,
+                     ((65, 0.08), (50, 0.19), (48, 0.23)))
+KAZAN_PAID = Segment("М-12 · Казань (Р-239) — Владимир", 610, 0.2, 2500,
+                     ((100, 0.01), (97, 0.02), (94, 0.025)), paid=True)
+VLADIMIR_PAID = Segment("М-12 · Владимир — Москва", 170, 0.18, 2500,
+                        ((100, 0.01), (95, 0.03), (92, 0.04)), paid=True)
+
+NORTH_ROUTES = (
+    Route("М-10 · бесплатный", 0, (MOSCOW_M10, NORTH_M10)),
+    Route("М-10 + М-11 · въезд у Солнечногорска", 3956, (MOSCOW_M10, NORTH_M11, SPB_ACCESS)),
+    Route("М-11 · платный", 4906, (MOSCOW_ACCESS, MOSCOW_M11, NORTH_M11, SPB_ACCESS)),
+)
+KAZAN_ROUTES = (
+    Route("М-7 · бесплатный", 0, (KAZAN_FREE, VLADIMIR_FREE)),
+    Route("М-7 + М-12 · через Владимир", 1737,
+          (KAZAN_FREE, VLADIMIR_LINK, VLADIMIR_PAID, MOSCOW_ACCESS)),
+    Route("М-12 · платный", 5847, (KAZAN_LINK, KAZAN_PAID, VLADIMIR_PAID, MOSCOW_ACCESS)),
+)
+M11_TARIFF = "https://avtodor-tr.ru/upload/iblock/402/k44r7q8jiukdw84ropm7pgd9khjh5o4h.pdf"
+M11_CONCESSION = "https://m11-neva.ru/upload/iblock/932/o3urum9w3ea9pvskhhrw7uh4b97klvkv.pdf"
+M12_TARIFF = "https://avtodor-tr.ru/upload/iblock/fe5/a2e7y350b1wrbw28x181m10z1eeblnfd.pdf"
+NORTH_SOURCES = (("Автодор · М-11 км 58–684", M11_TARIFF),
+                 ("МСС · М-11 км 15–58", M11_CONCESSION))
+CORRIDORS = {
+    ("Москва", "Санкт-Петербург"): (NORTH_ROUTES, NORTH_SOURCES),
+    ("Казань", "Москва"): (KAZAN_ROUTES, (("Автодор · М-12", M12_TARIFF),)),
+    ("Клин", "Тверь"): (
+        (ROUTES[0], replace(ROUTES[1], toll=150), replace(ROUTES[2], toll=410)),
+        (("Автодор · М-11", M11_TARIFF),),
+    ),
+}
+CITY_FUEL_PRICE = 65.0
+CITY_PEAK_DELAY = 10.0
 
 
 def consumption(speed: float, grade: float, radius: int | None) -> float:
@@ -241,6 +297,12 @@ def study_plan(fields: dict[str, list[str]], routes: tuple[Route, ...]) -> dict:
 
 def compare_cities(query: str) -> dict:
     fields = parse_qs(query, keep_blank_values=True, max_num_fields=10)
+    if "departure" in fields:
+        return fixed_departure(fields)
+    return compare_city_window(fields)
+
+
+def compare_city_window(fields: dict[str, list[str]]) -> dict:
     start, finish = (find_city(fields[key][0]) for key in ("origin", "destination"))
     if start == finish:
         raise ValueError("Выберите два разных города.")
@@ -275,6 +337,65 @@ def compare_cities(query: str) -> dict:
                            for candidate, route in zip(candidates, routes)],
             "provider": candidates[0]["provider"],
             "missingTolls": sum(route.toll is None for route in routes)}
+
+
+def fixed_departure(fields: dict[str, list[str]]) -> dict:
+    departure = parse_time(fields["departure"][0])
+    start, finish = (find_city(fields[key][0]) for key in ("origin", "destination"))
+    if start == finish:
+        raise ValueError("Выберите два разных города.")
+
+    pair = (start.name, finish.name)
+    reverse = pair not in CORRIDORS and pair[::-1] in CORRIDORS
+    corridor_key = pair[::-1] if reverse else pair
+    corridor = CORRIDORS.get(corridor_key)
+    if corridor:
+        routes, sources = corridor
+        if reverse:
+            routes = tuple(replace(route, segments=tuple(
+                replace(segment, grade=-segment.grade) for segment in reversed(route.segments)
+            )) for route in routes)
+        if corridor_key == ("Москва", "Санкт-Петербург"):
+            full_m11 = routes[-1]
+            concession = next(index for index, segment in enumerate(full_m11.segments)
+                              if segment.name == MOSCOW_M11.name)
+            to_toll_exit = replace(full_m11, segments=full_m11.segments[:concession + 1])
+            crossing = simulate(to_toll_exit, departure, CITY_FUEL_PRICE, 0).arrival % MINUTES_PER_DAY
+            concession_toll = 680 if 60 <= crossing < 360 else 950
+            routes = (*routes[:-1], replace(full_m11, toll=3956 + concession_toll))
+        candidates = [{"name": route.name, "geometry": None,
+                       "roads": [segment.name for segment in route.segments]} for route in routes]
+        provider = "Учебные маршруты по опубликованным тарифам"
+    else:
+        found = discover_routes(start, finish, os.environ.get("ROUTE_PLANNER_OSRM_URL", OSRM_URL))
+        routes = []
+        candidates = []
+        for index, route in enumerate(found, 1):
+            paid = route["toll_road"]
+            kind = "с платными участками" if paid is True else (
+                "без платных участков" if paid is False else "платность не определена")
+            name = f"Вариант {index} · {kind}"
+            km = route["distance"] / 1000
+            speed = km * 3600 / route["duration"]
+            rates = ((speed, 0), (speed, CITY_PEAK_DELAY / 100), (speed, CITY_PEAK_DELAY / 100))
+            routes.append(Route(name, 0 if paid is False else None, (Segment(name, km, 0, None, rates),)))
+            candidates.append({"name": name, "geometry": route["geometry"],
+                               "roads": route.get("paid_roads", [])})
+        sources = ()
+        provider = found[0]["provider"]
+
+    # Тот же расчёт расхода и затрат, ровно на заданное время.
+    time = format_time(departure)
+    study = study_plan({"start": [time], "end": [time], "deadline": [""],
+                        "price": [str(CITY_FUEL_PRICE)], "valueOfTime": ["0"],
+                        "objective": ["cost"]}, tuple(routes))
+    trips = study["trips"]
+    return {"origin": start.label, "destination": finish.label, "study": study,
+            "candidates": candidates, "provider": provider, "sources": sources,
+            "fuelPrice": CITY_FUEL_PRICE, "estimated": corridor is not None,
+            "missingTolls": sum(route.toll is None for route in routes),
+            "fastest": min(range(len(trips)), key=lambda index: trips[index]["duration"]),
+            "fuelBest": min(range(len(trips)), key=lambda index: trips[index]["fuel"])}
 
 
 def serve_web() -> None:

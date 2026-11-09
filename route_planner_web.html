@@ -19,7 +19,7 @@ footer{font-size:.85rem;margin-top:22px}.error{color:#932b23}
 .route-drawing polyline{fill:none;stroke:#17694f;stroke-width:3;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}
 .route-drawing circle{fill:#12634c;stroke:white;stroke-width:2}
 .route-drawing .finish{fill:#a04e30}
-#city-tolls:not(:empty){margin-top:12px}
+
 </style>
 </head>
 <body>
@@ -27,32 +27,16 @@ footer{font-size:.85rem;margin-top:22px}.error{color:#932b23}
 <header>
   <p class="eyebrow">Лабораторная работа · Оптимизация поездки</p>
   <h1>Автомобильные маршруты</h1>
-  <p class="muted">Поездки между городами России и сравнение М‑10 с М‑11 для учебного сценария.</p>
+  <p class="muted">Сравните время в пути, расход топлива и стоимость проезда.</p>
 </header>
 <form id="city-settings" class="card">
   <h2>Маршрут между городами России</h2>
   <div class="fields">
-    <label>Откуда<input name="origin" list="russian-cities" placeholder="Казань" maxlength="200" required></label>
-    <label>Куда<input name="destination" list="russian-cities" placeholder="Москва" maxlength="200" required></label>
-    <label>Критерий<select name="objective">
-      <option value="cost">Минимум общих расходов</option>
-      <option value="score">Расходы с оценкой времени</option>
-      <option value="duration">Минимум времени в пути</option>
-      <option value="distance">Минимум расстояния</option>
-      <option value="fuel">Минимум расчётного топлива</option>
-    </select></label>
+    <label>Откуда<input name="origin" list="russian-cities" placeholder="Москва" maxlength="200" required></label>
+    <label>Куда<input name="destination" list="russian-cities" placeholder="Санкт-Петербург" maxlength="200" required></label>
+    <label>Выезд, МСК<input name="departure" type="time" value="08:00" required></label>
   </div>
-  <div class="fields">
-    <label>Выезд с, МСК<input name="start" type="time" value="06:00" required></label>
-    <label>Выезд до, МСК<input name="end" type="time" value="09:00" required></label>
-    <label>Прибыть до, МСК<input name="deadline" type="time"></label>
-    <label>Топливо, ₽/л<input name="price" type="number" min="0.01" max="1000" step="0.01" value="65" required></label>
-    <label>Оценка времени, ₽/ч<input name="valueOfTime" type="number" min="0" max="10000" step="1" value="400" required></label>
-    <label>Задержка в час пик, мин/100 км<input name="peak" type="number" min="0" max="120" step="1" value="10" required></label>
-  </div>
-  <p class="muted">Модельные часы пик по МСК: 07:00–09:30 и 16:30–19:30. Чтобы сравнить варианты без задержки, укажите 0. Срок прибытия задаётся на день выезда.</p>
   <datalist id="russian-cities"></datalist>
-  <div id="city-tolls" class="fields"></div>
   <button type="submit">Построить маршрут</button>
   <p id="city-status" role="status"></p>
   <small>Введите названия или выберите города из подсказок. Внешний сервис получает координаты центров городов при расчёте.</small>
@@ -62,70 +46,22 @@ footer{font-size:.85rem;margin-top:22px}.error{color:#932b23}
   <p id="city-result-note" class="muted"></p>
   <p id="city-result-best" role="status"></p>
   <div class="scroll"><table>
-    <thead><tr><th>Маршрут</th><th>Выезд</th><th>Прибытие</th><th>В пути, мин</th><th>Км</th><th>Топливо, л</th><th>Топливо, ₽</th><th>Дорога, ₽</th><th>Итого, ₽</th><th>Со временем, ₽</th></tr></thead>
+    <thead><tr><th>Маршрут</th><th>Выезд</th><th>Прибытие</th><th>В пути, мин</th><th>Км</th><th>Топливо, л</th><th>Топливо, ₽</th><th>Дорога, ₽</th><th>Итого, ₽</th></tr></thead>
     <tbody id="city-results"></tbody>
   </table></div>
-  <details>
-    <summary>Расчёты для всех выездов с шагом 15 минут</summary>
-    <div class="scroll"><table>
-      <thead><tr><th>Маршрут</th><th>Выезд</th><th>Прибытие</th><th>В пути, мин</th><th>Км</th><th>Топливо, л</th><th>Топливо, ₽</th><th>Дорога, ₽</th><th>Итого, ₽</th><th>Со временем, ₽</th></tr></thead>
-      <tbody id="city-all"></tbody>
-    </table></div>
-  </details>
-  <label>Вариант на схеме<select id="city-map-choice"></select></label>
-  <figure>
+  <label>Подробности варианта<select id="city-map-choice"></select></label>
+  <p id="city-roads" class="muted"></p>
+  <figure id="city-map">
     <svg id="city-drawing" class="route-drawing" viewBox="0 0 600 260" role="img" aria-label="Схема выбранного автомобильного маршрута"></svg>
     <figcaption class="muted">Схема маршрута. Зелёная точка — старт, коричневая — финиш.</figcaption>
   </figure>
-  <small>Расход оценён по средней скорости на ровной дороге и с учётом холостого хода во время заданной задержки. Прочерк означает неизвестную стоимость.</small>
+  <small id="city-assumptions"></small>
+  <p id="city-sources"></p>
   <p><small>Маршруты <a href="https://valhalla.openstreetmap.de/">Valhalla</a> / <a href="https://routing.openstreetmap.de/about.html">OSRM</a> ·
     <a href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a> ·
     <a href="https://www.openstreetmap.org/fixthemap">Исправить карту</a> ·
     <a href="https://github.com/hflabs/city">Справочник DaData / HFLabs</a></small></p>
 </section>
-<h2>Учебный сценарий Клин → Тверь</h2>
-<form id="settings" class="card">
-  <h2>Условия поездки</h2>
-  <div class="fields">
-    <label>Выезд с, МСК<input name="start" type="time" value="07:30" required></label>
-    <label>Выезд до, МСК<input name="end" type="time" value="09:00" required></label>
-    <label>Прибыть до, МСК<input name="deadline" type="time"></label>
-    <label>Цена топлива, ₽/л<input name="price" type="number" min="0.01" max="1000" step="0.01" value="65" required></label>
-    <label>Оценка времени, ₽/ч<input name="valueOfTime" type="number" min="0" max="10000" step="1" value="400" required></label>
-    <label>Цель<select name="objective">
-      <option value="cost">Минимум расходов</option>
-      <option value="fuel">Минимум топлива</option>
-      <option value="duration">Минимум времени в пути</option>
-      <option value="score">Расходы с оценкой времени</option>
-    </select></label>
-  </div>
-  <button type="submit">Рассчитать</button>
-  <p id="error" class="error" role="alert" hidden></p>
-  <small>Учебный сценарий для понедельника — четверга. Шаг поиска 15 минут от начала окна. Конец окна также проверяется.</small>
-</form>
-<section id="recommendation" class="card result" aria-live="polite"></section>
-<section class="card">
-  <h2>Сравнение трёх маршрутов</h2>
-  <p id="caption" class="muted"></p>
-  <div class="scroll"><table>
-    <thead><tr><th>Маршрут</th><th>Выезд</th><th>Прибытие</th><th>В пути, мин</th><th>Км</th><th>Топливо, л</th><th>Топливо, ₽</th><th>Дорога, ₽</th><th>Итого, ₽</th><th>С оценкой времени, ₽</th></tr></thead>
-    <tbody id="comparison"></tbody>
-  </table></div>
-  <div id="legs"></div>
-</section>
-<details class="card">
-  <summary>Расчёты для всех проверенных выездов</summary>
-  <div class="scroll"><table>
-    <thead><tr><th>Маршрут</th><th>Выезд</th><th>Прибытие</th><th>В пути, мин</th><th>Км</th><th>Топливо, л</th><th>Топливо, ₽</th><th>Дорога, ₽</th><th>Итого, ₽</th><th>С оценкой времени, ₽</th></tr></thead>
-    <tbody id="all-trips"></tbody>
-  </table></div>
-</details>
-<footer class="muted">
-  Расчёт использует сценарные скорости, задержки и профиль дороги.
-  <a href="https://github.com/tokarevakate/vehicle-route/blob/main/webapp/consumption_model.py">Модель ТС</a> ·
-  <a href="https://avtodor-tr.ru/upload/iblock/613/eqvqrtjua5p4qquk3n94k9e8g0jdhvq1.pdf">Таблица тарифов сценария</a> ·
-  <a href="https://unitoll.ru/roads/m-11/objects_m11/traffic_junctions/">Развязки М‑11</a>
-</footer>
 </main>
 <script>
 "use strict";
@@ -193,72 +129,62 @@ function drawRoute(geometry) {
   svg.replaceChildren(line, ...endpoints);
 }
 
-const tollFields = document.getElementById("city-tolls");
 const mapChoice = document.getElementById("city-map-choice");
-let lastPair = "";
 let displayedCandidates = [];
 
-function showCityRoutes({origin, destination, study, candidates, provider, missingTolls}) {
-  const {trips, perRoute, best, earliest} = study;
-  const selected = best === null ? null : trips[best];
-  const counts = candidates.length === 1 ? "Найден один дорожный вариант." : "Найдено вариантов: " + candidates.length + ".";
-  const missing = missingTolls
-    ? " Для сравнения всех вариантов по стоимости укажите недостающие тарифы и повторите расчёт."
-    : "";
-  document.getElementById("city-result-title").textContent = origin + " → " + destination;
-  document.getElementById("city-result-note").textContent = provider + " · " + counts + missing;
-  document.getElementById("city-result-best").textContent = selected
-    ? selected.route.name + " · выезд " + selected.departure + " · прибытие " + selected.arrival
-    : trips.some(trip => trip.feasible)
-      ? "Введите тарифы, чтобы выбрать маршрут по стоимости."
-      : "К указанному сроку маршрутов нет. Самое раннее прибытие — " + earliest + ".";
-  renderRows("city-results", perRoute.map(index => trips[index]), selected);
-  renderRows("city-all", trips, selected);
+function showRouteDetails() {
+  const candidate = displayedCandidates[mapChoice.selectedIndex];
+  document.getElementById("city-roads").textContent = candidate.roads.join(" · ");
+  document.getElementById("city-map").hidden = !candidate.geometry;
+  if (candidate.geometry) drawRoute(candidate.geometry);
+}
 
-  const inputs = candidates.map(candidate => {
-    const label = document.createElement("label");
-    label.textContent = candidate.name + " · проезд, ₽";
-    const input = document.createElement("input");
-    input.type = "number";
-    input.min = "0";
-    input.max = "100000";
-    input.step = "0.01";
-    input.dataset.route = candidate.id;
-    input.placeholder = "Введите тариф";
-    input.value = candidate.toll ?? "";
-    label.append(input);
-    if (candidate.paidRoads.length) {
-      const roads = document.createElement("small");
-      roads.textContent = candidate.paidRoads.join(", ");
-      label.append(roads);
-    }
-    return label;
+function showCityRoutes({origin, destination, study, candidates, provider, sources,
+                         fuelPrice, estimated, missingTolls, fastest, fuelBest}) {
+  const {trips, best} = study;
+  const cheapest = best === null ? null : trips[best];
+  document.getElementById("city-result-title").textContent = origin + " → " + destination;
+  const count = candidates.length === 1
+    ? "Сервис нашёл один различимый маршрут."
+    : "Вариантов: " + candidates.length + ".";
+  const unknown = missingTolls ? " У части вариантов тариф неизвестен, их итоговая стоимость не рассчитана." : "";
+  document.getElementById("city-result-note").textContent = provider + " · " + count + unknown;
+  const highlights = [];
+  if (cheapest) highlights.push((missingTolls ? "Дешевле среди оценённых" : "Дешевле") + " — " + cheapest.route.name);
+  highlights.push("Быстрее — " + trips[fastest].route.name, "Меньше топлива — " + trips[fuelBest].route.name);
+  document.getElementById("city-result-best").textContent = highlights.join(" | ");
+  renderRows("city-results", trips, cheapest);
+
+  document.getElementById("city-assumptions").textContent =
+    "Топливо — " + number(fuelPrice) + " ₽/л в расчёте. Время и расход оценочные, задержки смоделированы по времени выезда. " +
+    (estimated ? "Тарифы взяты из таблиц операторов для легкового автомобиля в сценарии пн–чт. Для км 15–58 М-11 учтён ночной тариф." :
+      "Прочерк означает, что цена проезда для этого маршрута неизвестна.");
+  const links = sources.map(([name, url]) => {
+    const link = document.createElement("a");
+    link.href = url;
+    link.textContent = name;
+    return link;
   });
-  tollFields.replaceChildren(...inputs);
+  document.getElementById("city-sources").replaceChildren(...links.flatMap((link, index) => index ? [" · ", link] : [link]));
+
   displayedCandidates = candidates;
   mapChoice.replaceChildren(...candidates.map((candidate, index) => new Option(candidate.name, index)));
-  mapChoice.selectedIndex = Math.max(0, candidates.findIndex(candidate => candidate.name === selected?.route.name));
-  drawRoute(candidates[mapChoice.selectedIndex].geometry);
+  mapChoice.selectedIndex = best ?? fastest;
+  showRouteDetails();
   cityResult.hidden = false;
 }
 
-mapChoice.addEventListener("change", () => drawRoute(displayedCandidates[mapChoice.selectedIndex].geometry));
+mapChoice.addEventListener("change", showRouteDetails);
 
 cityForm.addEventListener("submit", async event => {
   event.preventDefault();
   const button = cityForm.querySelector("button[type=submit]");
   button.disabled = true;
   cityResult.hidden = true;
-  cityStatus.textContent = "Ищем маршруты и сравниваем время выезда…";
-  const params = new URLSearchParams(new FormData(cityForm));
-  const pair = JSON.stringify([params.get("origin").trim().toLowerCase(), params.get("destination").trim().toLowerCase()]);
-  if (pair !== lastPair) tollFields.replaceChildren();
-  const tolls = Object.fromEntries([...tollFields.querySelectorAll("input")]
-    .filter(input => input.value !== "").map(input => [input.dataset.route, input.value]));
-  params.set("tolls", JSON.stringify(tolls));
+  cityStatus.textContent = "Ищем и сравниваем маршруты…";
   try {
+    const params = new URLSearchParams(new FormData(cityForm));
     showCityRoutes(await cityRequest("/api/city-compare?" + params));
-    lastPair = pair;
     cityStatus.textContent = "";
   } catch (error) {
     cityStatus.textContent = error.message;
@@ -278,7 +204,7 @@ function renderRows(id, trips, best) {
     const values = [
       trip.route.name + (trip.feasible ? "" : " · опоздание"), trip.departure,
       trip.arrival, number(trip.duration, 1), number(trip.km, Number.isInteger(trip.km) ? 0 : 1), number(trip.fuel, 2),
-      number(trip.fuelCost, 2), money(trip.route.toll), money(trip.cost), money(trip.score)
+      number(trip.fuelCost, 2), money(trip.route.toll), money(trip.cost)
     ];
     values.forEach((value, index) => {
       const cell = document.createElement(index ? "td" : "th");
@@ -290,65 +216,6 @@ function renderRows(id, trips, best) {
   }));
 }
 
-function render({trips, perRoute, best, earliest, legs: segments}) {
-  const selected = best === null ? null : trips[best];
-  const recommendation = document.getElementById("recommendation");
-  document.getElementById("caption").textContent =
-    "Для каждого маршрута показан лучший допустимый выезд по выбранной цели. При опоздании показано самое раннее прибытие.";
-  renderRows("comparison", perRoute.map(index => trips[index]), selected);
-  renderRows("all-trips", trips, selected);
-  document.getElementById("legs").replaceChildren();
-  if (!selected) {
-    recommendation.innerHTML = "<h2>Ни один маршрут не укладывается в срок</h2>"
-      + "<p>Самое раннее расчётное прибытие — " + earliest + ".</p>";
-    return;
-  }
-  recommendation.innerHTML = '<p class="eyebrow">Выбранный вариант · проверено ' + trips.length
-    + " комбинаций</p><h2>" + selected.route.name + " · выезд " + selected.departure
-    + "</h2><p>Прибытие " + selected.arrival + " · " + number(selected.duration, 1)
-    + " мин в пути · " + number(selected.fuel, 2) + " л · " + number(selected.cost, 2) + " ₽ расходов</p>";
-  const legs = document.createElement("div");
-  legs.className = "legs";
-  for (const segment of segments) {
-    const leg = document.createElement("span");
-    leg.className = segment.paid ? "leg paid" : "leg";
-    leg.textContent = segment.name + " · " + segment.km + " км";
-    legs.append(leg);
-  }
-  document.getElementById("legs").append(legs);
-}
-
-const form = document.getElementById("settings");
-const error = document.getElementById("error");
-
-const submit = form.querySelector("button[type=submit]");
-
-async function update() {
-  submit.disabled = true;
-  error.hidden = true;
-  try {
-    const query = new URLSearchParams(new FormData(form));
-    const response = await fetch("/api/plan?" + query);
-    const result = await response.json();
-    if (!response.ok) {
-      error.textContent = result.error;
-      error.hidden = false;
-      return;
-    }
-    render(result);
-  } catch {
-    error.textContent = "Нет связи с Python-сервером. Запустите route_planner.py и откройте адрес из Терминала.";
-    error.hidden = false;
-  } finally {
-    submit.disabled = false;
-  }
-}
-
-form.addEventListener("submit", event => {
-  event.preventDefault();
-  update();
-});
-update();
 </script>
 </body>
 </html>
