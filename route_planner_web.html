@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Клин → Тверь · Планировщик поездки</title>
+<title>Планировщик автомобильных маршрутов</title>
 <style>
 :root{color-scheme:light;--ink:#182b29;--muted:#4e6661;--line:#d4dfdb;--accent:#12634c;--paper:#f3f6f2}
 *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.5 system-ui,sans-serif}
@@ -15,15 +15,54 @@ input,select,button{display:block;width:100%;font:inherit;border-radius:8px;bord
 .legs{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.leg{background:#eaf0ed;border-radius:8px;padding:5px 10px;font-size:.85rem}.leg.paid{background:#d5eae1;color:#114d3a}
 footer{font-size:.85rem;margin-top:22px}.error{color:#932b23}
 @media(max-width:520px){main{padding:26px 12px}.card{padding:15px}button{width:100%}}
+.route-drawing{display:block;width:100%;max-height:270px;margin-top:14px;border-radius:10px;background:#eff5f0}
+.route-drawing polyline{fill:none;stroke:#17694f;stroke-width:3;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}
+.route-drawing circle{fill:#12634c;stroke:white;stroke-width:2}
+.route-drawing .finish{fill:#a04e30}
+#city-results tr:first-child td{background:#e2f2e9}
 </style>
 </head>
 <body>
 <main>
 <header>
   <p class="eyebrow">Лабораторная работа · Оптимизация поездки</p>
-  <h1>Клин → Тверь</h1>
-  <p class="muted">М‑10, М‑11 и смешанный маршрут через развязку у Завидова.</p>
+  <h1>Автомобильные маршруты</h1>
+  <p class="muted">Поездки между городами России и сравнение М‑10 с М‑11 для учебного сценария.</p>
 </header>
+<form id="city-settings" class="card">
+  <h2>Маршрут между городами России</h2>
+  <div class="fields">
+    <label>Откуда<input name="origin" list="russian-cities" placeholder="Клин" maxlength="200" required></label>
+    <label>Куда<input name="destination" list="russian-cities" placeholder="Тверь" maxlength="200" required></label>
+    <label>Критерий<select name="objective">
+      <option value="duration">Минимум времени в пути</option>
+      <option value="distance">Минимум расстояния</option>
+      <option value="fuel">Минимум расчётного топлива</option>
+    </select></label>
+  </div>
+  <datalist id="russian-cities"></datalist>
+  <button type="submit">Построить маршрут</button>
+  <p id="city-status" role="status"></p>
+  <small>Введите названия или выберите города из подсказок. Внешний сервис получает координаты центров городов при расчёте.</small>
+</form>
+<section id="city-result" class="card" aria-live="polite" hidden>
+  <h2 id="city-result-title"></h2>
+  <p id="city-result-note" class="muted"></p>
+  <div class="scroll"><table>
+    <thead><tr><th>Вариант</th><th>Расстояние, км</th><th>В пути</th><th>Топливо, л (оценка)</th></tr></thead>
+    <tbody id="city-results"></tbody>
+  </table></div>
+  <figure>
+    <svg id="city-drawing" class="route-drawing" viewBox="0 0 600 260" role="img" aria-label="Схема выбранного автомобильного маршрута"></svg>
+    <figcaption class="muted">Схема выбранного маршрута. Зелёная точка — старт, коричневая — финиш.</figcaption>
+  </figure>
+  <small>Время рассчитано без текущих пробок. Расход оценён по средней скорости на ровной дороге. Тарифы и время выезда здесь не учитываются.</small>
+  <p><small>Маршруты: <a href="https://routing.openstreetmap.de/about.html">OSRM / FOSSGIS</a> ·
+    <a href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a> ·
+    <a href="https://www.openstreetmap.org/fixthemap">Исправить карту</a> ·
+    <a href="https://github.com/hflabs/city">Справочник DaData / HFLabs</a></small></p>
+</section>
+<h2>Учебный сценарий Клин → Тверь</h2>
 <form id="settings" class="card">
   <h2>Условия поездки</h2>
   <div class="fields">
@@ -73,6 +112,107 @@ footer{font-size:.85rem;margin-top:22px}.error{color:#932b23}
 const number = (value, digits = 0) => value.toLocaleString("ru-RU", {
   minimumFractionDigits: digits, maximumFractionDigits: digits
 });
+const cityForm = document.getElementById("city-settings");
+const cityStatus = document.getElementById("city-status");
+const cityResult = document.getElementById("city-result");
+
+async function cityRequest(path) {
+  const response = await fetch(path);
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || "Не удалось выполнить запрос.");
+  return payload;
+}
+
+async function loadCities() {
+  try {
+    const names = await cityRequest("/api/cities");
+    const options = names.map(name => {
+      const option = document.createElement("option");
+      option.value = name;
+      return option;
+    });
+    document.getElementById("russian-cities").replaceChildren(...options);
+  } catch {
+    cityStatus.textContent = "Подсказки недоступны. Можно ввести названия вручную.";
+  }
+}
+
+function drawRoute(geometry) {
+  const svg = document.getElementById("city-drawing");
+  const ns = "http://www.w3.org/2000/svg";
+  const longitudeScale = Math.cos(geometry[0][1] * Math.PI / 180);
+  let previousLon = geometry[0][0];
+  const points = geometry.map(([lon, lat]) => {
+    const difference = lon - previousLon;
+    previousLon += difference - 360 * Math.round(difference / 360);
+    return [previousLon * longitudeScale, -lat];
+  });
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x, y] of points) {
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  const scale = Math.min(560 / (maxX - minX || 1), 220 / (maxY - minY || 1));
+  const coordinates = points.map(([x, y]) => [
+    300 + (x - (minX + maxX) / 2) * scale,
+    130 + (y - (minY + maxY) / 2) * scale,
+  ]);
+  const line = document.createElementNS(ns, "polyline");
+  line.setAttribute("points", coordinates.map(point => point.join(",")).join(" "));
+  const endpoints = [coordinates[0], coordinates[coordinates.length - 1]].map(([x, y], index) => {
+    const marker = document.createElementNS(ns, "circle");
+    marker.setAttribute("cx", x);
+    marker.setAttribute("cy", y);
+    marker.setAttribute("r", 6);
+    if (index) marker.classList.add("finish");
+    return marker;
+  });
+  svg.replaceChildren(line, ...endpoints);
+}
+
+function showCityRoutes({origin, destination, routes}) {
+  document.getElementById("city-result-title").textContent = origin + " → " + destination;
+  document.getElementById("city-result-note").textContent = routes.length === 1
+    ? "Дорожный сервис вернул один вариант."
+    : "Первый вариант лучший по выбранному критерию среди найденных маршрутов.";
+  const rows = routes.map((route, index) => {
+    const row = document.createElement("tr");
+    const minutes = Math.round(route.duration);
+    const duration = minutes < 60 ? minutes + " мин" : Math.floor(minutes / 60) + " ч " + minutes % 60 + " мин";
+    const values = [index === 0 ? "Выбранный" : "Альтернатива " + index,
+      number(route.distance, 1), duration, number(route.fuel, 2)];
+    for (const value of values) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    }
+    return row;
+  });
+  document.getElementById("city-results").replaceChildren(...rows);
+  drawRoute(routes[0].geometry);
+  cityResult.hidden = false;
+}
+
+cityForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  const button = event.submitter;
+  button.disabled = true;
+  cityResult.hidden = true;
+  cityStatus.textContent = "Ищем маршрут…";
+  try {
+    const params = new URLSearchParams(new FormData(cityForm));
+    showCityRoutes(await cityRequest("/api/city-route?" + params));
+    cityStatus.textContent = "";
+  } catch (error) {
+    cityStatus.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+loadCities();
+
 function renderRows(id, trips, best) {
   const body = document.getElementById(id);
   body.replaceChildren(...trips.map(trip => {
