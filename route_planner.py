@@ -12,6 +12,8 @@ import threading
 from urllib.parse import parse_qs, urlsplit
 import webbrowser
 
+from city_routing import RoutingUnavailable, cities, city_plan
+
 MINUTES_PER_DAY = 1440
 IDLE_LITRES_PER_HOUR = 0.6
 EPSILON = 1e-8
@@ -82,13 +84,13 @@ ROUTES = (
 )
 
 
-def consumption(speed: float, grade: float, radius: int) -> float:
+def consumption(speed: float, grade: float, radius: int | None) -> float:
     """Расход в л/100 км при нулевом ускорении по модели первой работы."""
     # FuelCoeffs.from_vehicle(VehicleParams()), vehicle-route.
     # Коэффициент спуска в исходной калибровке равен нулю.
     flat = 6.700070172932973 - 0.08112399995420332 * speed + 0.0008807510214262922 * speed**2
     climb = 1.8327313488603818 * max(grade, 0)
-    turning = 0.002 * speed**2 / radius
+    turning = 0.002 * speed**2 / radius if radius is not None else 0
     return max(0.5, flat + climb + turning)
 
 
@@ -245,14 +247,25 @@ def serve_web() -> None:
             if target.path == "/":
                 self.respond(200, "text/html; charset=utf-8", page)
                 return
-            if target.path != "/api/plan":
+            if target.path not in {"/api/plan", "/api/cities", "/api/city-route"}:
                 self.send_error(404)
                 return
             try:
-                result = web_plan(target.query)
+                if target.path == "/api/cities":
+                    result = sorted(city.label for city in cities())
+                elif target.path == "/api/city-route":
+                    fields = parse_qs(target.query, keep_blank_values=True, max_num_fields=3)
+                    result = city_plan(fields["origin"][0], fields["destination"][0],
+                                       fields["objective"][0], consumption)
+                else:
+                    result = web_plan(target.query)
                 status = 200
             except (KeyError, argparse.ArgumentTypeError):
-                result, status = {"error": "Проверьте заполнение полей и формат времени."}, 400
+                result, status = {"error": "Проверьте заполнение полей."}, 400
+            except RoutingUnavailable as exc:
+                result, status = {"error": str(exc)}, 502
+            except OSError:
+                result, status = {"error": "Не удалось загрузить справочник городов."}, 500
             except ValueError as exc:
                 result, status = {"error": str(exc)}, 400
             self.respond(status, "application/json; charset=utf-8",
