@@ -202,7 +202,10 @@ def valhalla_routes(start: City, finish: City, preference: dict) -> list[dict]:
             if not (isfinite(km) and km > 0 and isfinite(seconds) and seconds > 0 and len(geometry) >= 2):
                 raise ValueError("invalid route")
             flags = [leg["summary"].get("has_toll") for leg in legs]
-            toll = True if True in flags else False if all(flag is False for flag in flags) else None
+            trip_flag = summary.get("has_toll")
+            toll = True if trip_flag is True or any(flag is True for flag in flags) else (
+                False if trip_flag is False or all(flag is False for flag in flags) else None
+            )
             paid_roads = list(dict.fromkeys(
                 name for leg in legs for maneuver in leg.get("maneuvers", [])
                 if maneuver.get("toll")
@@ -227,10 +230,10 @@ def discover_routes(start: City, finish: City, osrm_url: str) -> tuple[dict, ...
         if False not in flags:
             preferences.append({"exclude_tolls": True})
         if True not in flags:
-            preferences.append({"use_tolls": 1})
+            preferences.append({"use_tolls": 1, "use_highways": 1})
         preferences.append({"use_highways": 0.1, "use_tolls": 0.25})
         for preference in preferences:
-            if "use_highways" in preference and len({json.dumps(route["geometry"]) for route in routes}) >= 3:
+            if preference.get("use_highways") == 0.1 and len({json.dumps(route["geometry"]) for route in routes}) >= 3:
                 break
             try:
                 routes.extend(valhalla_routes(start, finish, preference))

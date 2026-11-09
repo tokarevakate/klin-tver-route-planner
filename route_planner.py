@@ -36,6 +36,7 @@ class Segment:
     # Пары (км/ч, мин задержки на км) вне пика, утром и вечером.
     rates: tuple[tuple[float, float], ...]
     paid: bool = False
+    toll_rubles: int | None = None
 
 
 @dataclass(frozen=True)
@@ -125,12 +126,48 @@ KAZAN_ROUTES = (
           (KAZAN_FREE, VLADIMIR_LINK, VLADIMIR_PAID, MOSCOW_ACCESS)),
     Route("М-12 · платный", 5847, (KAZAN_LINK, KAZAN_PAID, VLADIMIR_PAID, MOSCOW_ACCESS)),
 )
+# М-4 до северного въезда в Воронеж. Плата за ПВП 62 — отдельная
+# развязка внутри км 21–93, а ПВП 515 находится за выбранным съездом.
+M4_TARIFF = "https://avtodor-tr.ru/road/tariffs/#m4"
+M4_PAID_RATES = ((98, 0.025), (94, 0.04), (93, 0.045))
+M4_BYPASS_RATES = ((72, 0.08), (61, 0.16), (58, 0.20))
+M4_SECTIONS = (
+    (21, 93, 310, 77, "Каширское шоссе"),
+    (93, 211, 400, 131, "Р-22, Р-114 и Узловая"),
+    (211, 266, 260, 61, "Крутой Верх — Богородицк — Кузовка"),
+    (266, 322, 260, 63, "Чернятино — Покровка — Пушкари"),
+    (322, 401, 370, 87, "Бабарыкино, Яркино и Елец"),
+    (401, 464, 230, 70, "Старая М-4 через Задонск и Хлевное"),
+)
+M4_APPROACH = Segment("Москва · подъезд к М-4", 25, 0.15, 800,
+                      ((55, 0.1), (40, 0.25), (37, 0.30)))
+VORONEZH_ACCESS = Segment("М-4 · км 464–492 и северный въезд в Воронеж", 46, 0.25, 1000,
+                          ((69, 0.06), (56, 0.14), (52, 0.20)))
+M4_MAIN = tuple(
+    Segment(f"М-4 · км {start}–{finish}", finish - start, 0.22, 2200, M4_PAID_RATES,
+            paid=True, toll_rubles=toll)
+    for start, finish, toll, _, _ in M4_SECTIONS
+)
+M4_BYPASSES = tuple(
+    Segment(f"Объезд км {start}–{finish} · {name}", distance, 0.3, 850, M4_BYPASS_RATES)
+    for start, finish, _, distance, name in M4_SECTIONS
+)
+VORONEZH_ROUTES = (
+    Route("М-4 · бесплатные объезды", 0, (M4_APPROACH, *M4_BYPASSES, VORONEZH_ACCESS)),
+    Route("М-4 · платно до Быковки, далее объезды",
+          sum(segment.toll_rubles or 0 for segment in M4_MAIN[:2]),
+          (M4_APPROACH, *M4_MAIN[:2], *M4_BYPASSES[2:], VORONEZH_ACCESS)),
+    Route("М-4 «Дон» · платный основной ход",
+          sum(segment.toll_rubles or 0 for segment in M4_MAIN),
+          (M4_APPROACH, *M4_MAIN, VORONEZH_ACCESS)),
+)
 M11_TARIFF = "https://avtodor-tr.ru/upload/iblock/402/k44r7q8jiukdw84ropm7pgd9khjh5o4h.pdf"
 M11_CONCESSION = "https://m11-neva.ru/upload/iblock/932/o3urum9w3ea9pvskhhrw7uh4b97klvkv.pdf"
 M12_TARIFF = "https://avtodor-tr.ru/upload/iblock/fe5/a2e7y350b1wrbw28x181m10z1eeblnfd.pdf"
 NORTH_SOURCES = (("Автодор · М-11 км 58–684", M11_TARIFF),
                  ("МСС · М-11 км 15–58", M11_CONCESSION))
 CORRIDORS = {
+    ("Москва", "Воронеж"): (VORONEZH_ROUTES, (("Автодор · М-4 и бесплатные объезды", M4_TARIFF),)),
     ("Москва", "Санкт-Петербург"): (NORTH_ROUTES, NORTH_SOURCES),
     ("Казань", "Москва"): (KAZAN_ROUTES, (("Автодор · М-12", M12_TARIFF),)),
     ("Клин", "Тверь"): (
@@ -363,8 +400,13 @@ def fixed_departure(fields: dict[str, list[str]]) -> dict:
             crossing = simulate(to_toll_exit, departure, CITY_FUEL_PRICE, 0).arrival % MINUTES_PER_DAY
             concession_toll = 680 if 60 <= crossing < 360 else 950
             routes = (*routes[:-1], replace(full_m11, toll=3956 + concession_toll))
-        candidates = [{"name": route.name, "geometry": None,
-                       "roads": [segment.name for segment in route.segments]} for route in routes]
+        candidates = [{
+            "name": route.name,
+            "geometry": None,
+            "roads": [f"{segment.name} ({segment.toll_rubles} ₽)"
+                      if segment.toll_rubles is not None else segment.name
+                      for segment in route.segments],
+        } for route in routes]
         provider = "Учебные маршруты по опубликованным тарифам"
     else:
         found = discover_routes(start, finish, os.environ.get("ROUTE_PLANNER_OSRM_URL", OSRM_URL))
