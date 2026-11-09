@@ -2,8 +2,15 @@
 
 import argparse
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
 from math import ceil, isfinite
+from pathlib import Path
 import re
+import sys
+import threading
+from urllib.parse import parse_qs, urlsplit
+import webbrowser
 
 MINUTES_PER_DAY = 1440
 IDLE_LITRES_PER_HOUR = 0.6
@@ -24,6 +31,7 @@ class Segment:
     radius: int
     # Пары (км/ч, мин задержки на км) вне пика, утром и вечером.
     rates: tuple[tuple[float, float], ...]
+    paid: bool = False
 
 
 @dataclass(frozen=True)
@@ -61,9 +69,9 @@ KLIN_ACCESS = Segment("А-108: Клин — въезд на М-11", 9, 0.35, 700
 ZAVIDOVO_ACCESS = Segment("Подъезд к М-11 у Завидова", 4, 0.30, 550,
                           ((50, 0.04), (45, 0.09), (45, 0.09)))
 PAID_WEST = Segment("М-11: ПВП 89 — 124", 34, 0.20, 2000,
-                    ((90, 0.01), (88, 0.03), (88, 0.03)))
+                    ((90, 0.01), (88, 0.03), (88, 0.03)), paid=True)
 PAID_EAST = Segment("М-11: 124 — 149 км", 25, 0.18, 2000,
-                    ((90, 0.01), (88, 0.03), (88, 0.03)))
+                    ((90, 0.01), (88, 0.03), (88, 0.03)), paid=True)
 TVER_ACCESS = Segment("Тверь-Юг — центр Твери", 15, 0.25, 700,
                       ((48, 0.14), (34, 0.42), (38, 0.31)))
 
@@ -156,8 +164,120 @@ def print_table(trips: list[Trip], deadline: int | None) -> None:
         print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
 
 
+def is_feasible(trip: Trip, deadline: int | None) -> bool:
+    return deadline is None or trip.arrival <= deadline + EPSILON
+
+
+def plan(start: int, end: int, deadline: int | None, price: float,
+         value_of_time: float, objective: str) -> tuple[list[Trip], list[Trip], Trip | None]:
+    if start > end:
+        raise ValueError("Конец окна выезда должен быть не раньше начала.")
+    if deadline is not None and deadline < start:
+        raise ValueError("Срок прибытия должен быть не раньше начала окна выезда.")
+    if not isfinite(price) or not 0 < price <= 1000:
+        raise ValueError("Цена топлива должна быть больше 0 и не выше 1000 ₽/л.")
+    if not isfinite(value_of_time) or not 0 <= value_of_time <= 10000:
+        raise ValueError("Оценка времени должна быть от 0 до 10 000 ₽/ч.")
+    if objective not in OBJECTIVES:
+        raise ValueError("Выберите критерий оптимизации.")
+
+    departures = [*range(start, end, 15), end]
+    trips = [simulate(route, departure, price, value_of_time)
+             for departure in departures for route in ROUTES]
+    ranked = sorted((trip for trip in trips if is_feasible(trip, deadline)),
+                    key=lambda trip: ranking(trip, objective))
+    per_route = []
+    for route in ROUTES:
+        best = next((trip for trip in ranked if trip.route == route), None)
+        if best is None:
+            best = min((trip for trip in trips if trip.route == route),
+                       key=lambda trip: trip.arrival)
+        per_route.append(best)
+    return trips, per_route, ranked[0] if ranked else None
+
+
+def web_plan(query: str) -> dict:
+    fields = parse_qs(query, keep_blank_values=True, max_num_fields=6)
+    start = parse_time(fields["start"][0])
+    end = parse_time(fields["end"][0])
+    deadline_text = fields["deadline"][0]
+    deadline = parse_time(deadline_text) if deadline_text else None
+    trips, per_route, best = plan(start, end, deadline, float(fields["price"][0]),
+                                  float(fields["valueOfTime"][0]), fields["objective"][0])
+    return {
+        "trips": [{
+            "route": {"name": trip.route.name, "toll": trip.route.toll},
+            "departure": format_time(trip.departure),
+            "arrival": format_time(trip.arrival),
+            "duration": trip.duration,
+            "km": trip.km,
+            "fuel": trip.fuel,
+            "fuelCost": trip.fuel_cost,
+            "cost": trip.cost,
+            "score": trip.score,
+            "feasible": is_feasible(trip, deadline),
+        } for trip in trips],
+        "perRoute": [trips.index(trip) for trip in per_route],
+        "best": trips.index(best) if best is not None else None,
+        "earliest": format_time(min(trip.arrival for trip in trips)),
+        "legs": [{"name": segment.name, "km": segment.km, "paid": segment.paid}
+                 for segment in best.route.segments] if best is not None else [],
+    }
+
+
+def serve_web() -> None:
+    try:
+        page = Path(__file__).with_name("route_planner_web.html").read_bytes()
+    except OSError as exc:
+        raise SystemExit(f"Не удалось открыть route_planner_web.html рядом со скриптом: {exc}") from exc
+
+    class Handler(BaseHTTPRequestHandler):
+        def respond(self, status: int, content_type: str, body: bytes) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:
+            target = urlsplit(self.path)
+            if target.path == "/":
+                self.respond(200, "text/html; charset=utf-8", page)
+                return
+            if target.path != "/api/plan":
+                self.send_error(404)
+                return
+            try:
+                result = web_plan(target.query)
+                status = 200
+            except (KeyError, argparse.ArgumentTypeError):
+                result, status = {"error": "Проверьте заполнение полей и формат времени."}, 400
+            except ValueError as exc:
+                result, status = {"error": str(exc)}, 400
+            self.respond(status, "application/json; charset=utf-8",
+                         json.dumps(result, ensure_ascii=False).encode("utf-8"))
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    try:
+        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+            url = f"http://127.0.0.1:{server.server_port}/"
+            print(f"Планировщик: {url}  ·  Для остановки нажмите Ctrl+C.", flush=True)
+            threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
+            server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nСервер остановлен.")
+    except OSError as exc:
+        raise SystemExit(f"Не удалось запустить локальный сервер: {exc}") from exc
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Учебный планировщик Клин → Тверь.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--web", action="store_true", help="открыть планировщик в браузере")
+    mode.add_argument("--cli", action="store_true", help="вывести расчёт в Терминале")
     parser.add_argument("--start", type=parse_time, default="07:30", help="начало окна выезда, МСК")
     parser.add_argument("--end", type=parse_time, default="09:00", help="конец окна выезда, МСК")
     parser.add_argument("--deadline", type=parse_time, help="срок прибытия в день выезда, МСК")
@@ -168,31 +288,18 @@ def main() -> None:
     parser.add_argument("--all", action="store_true", help="показать результаты для всех выездов")
     args = parser.parse_args()
 
-    if args.start > args.end:
-        parser.error("конец окна выезда должен быть не раньше начала")
-    if args.deadline is not None and args.deadline < args.start:
-        parser.error("срок прибытия должен быть не раньше начала окна выезда")
-    if not isfinite(args.price) or not 0 < args.price <= 1000:
-        parser.error("цена топлива должна быть больше 0 и не выше 1000 ₽/л")
-    if not isfinite(args.value_of_time) or not 0 <= args.value_of_time <= 10000:
-        parser.error("оценка времени должна быть от 0 до 10 000 ₽/ч")
-
-    departures = [*range(args.start, args.end, 15), args.end]
-    trips = [
-        simulate(route, departure, args.price, args.value_of_time)
-        for departure in departures
-        for route in ROUTES
-    ]
-    feasible = [
-        trip for trip in trips
-        if args.deadline is None or trip.arrival <= args.deadline + EPSILON
-    ]
-    ranked = sorted(feasible, key=lambda trip: ranking(trip, args.objective))
+    if args.web or not sys.argv[1:]:
+        serve_web()
+        return
+    try:
+        trips, per_route, best = plan(args.start, args.end, args.deadline, args.price,
+                                      args.value_of_time, args.objective)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     print(f"Клин → Тверь · МСК · проверено вариантов: {len(trips)}")
     print(f"Критерий — {OBJECTIVES[args.objective]}.")
-    if ranked:
-        best = ranked[0]
+    if best is not None:
         print(f"Выбран {best.route.name}, выезд {format_time(best.departure)}, "
               f"прибытие {format_time(best.arrival)}.")
         print("Участки — " + " → ".join(segment.name for segment in best.route.segments))
@@ -200,18 +307,8 @@ def main() -> None:
         earliest = min(trip.arrival for trip in trips)
         print(f"Нет маршрута, укладывающегося в срок. Самое раннее прибытие — {format_time(earliest)}.")
 
-    if args.all:
-        shown = trips
-    else:
-        shown = []
-        for route in ROUTES:
-            route_best = next((trip for trip in ranked if trip.route == route), None)
-            if route_best is None:
-                route_best = min((trip for trip in trips if trip.route == route),
-                                 key=lambda trip: trip.arrival)
-            shown.append(route_best)
     print()
-    print_table(shown, args.deadline)
+    print_table(trips if args.all else per_route, args.deadline)
     if args.deadline is not None:
         print("* Прибытие после заданного срока.")
 

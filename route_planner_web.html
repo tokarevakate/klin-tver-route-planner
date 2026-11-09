@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Клин → Тверь · Планировщик поездки</title>
+<style>
+:root{color-scheme:light;--ink:#182b29;--muted:#4e6661;--line:#d4dfdb;--accent:#12634c;--paper:#f3f6f2}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.5 system-ui,sans-serif}
+main{max-width:1120px;margin:auto;padding:40px 22px 60px}header{margin-bottom:24px}h1{margin:.15em 0;font-size:clamp(2.25rem,7vw,4.25rem);line-height:1.05;letter-spacing:-.055em}h2{font-size:1.25rem;margin:0 0 12px}p{margin:.5em 0}.eyebrow{font-weight:750;letter-spacing:.12em;text-transform:uppercase;font-size:.73rem;color:var(--accent)}
+.card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:22px;margin:16px 0}.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}label{font-size:.84rem;font-weight:650}
+input,select,button{display:block;width:100%;font:inherit;border-radius:8px;border:1px solid #9cb3aa;padding:8px;background:white;color:var(--ink);margin-top:4px;min-height:42px}button{background:var(--accent);color:#fff;font-weight:700;border-color:var(--accent);width:auto;cursor:pointer;margin-top:16px;padding-inline:20px}a{color:var(--accent)}
+.result{background:#123f33;color:#fff}.result .eyebrow{color:#b0e3cf}.result h2{margin:4px 0;font-size:1.5rem}.result p{color:#e3f2ed}
+.scroll{overflow:auto}table{width:100%;border-collapse:collapse;font-size:.9rem}th,td{text-align:left;white-space:nowrap;padding:10px 9px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}th{font-size:.75rem;color:var(--muted)}tr.best>*{background:#e2f2e9}tr.late>*{color:#755343}tbody tr:last-child td{border-bottom:0}.muted,small{color:var(--muted)}summary{cursor:pointer;font-weight:700}details>div{margin-top:10px}
+.legs{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.leg{background:#eaf0ed;border-radius:8px;padding:5px 10px;font-size:.85rem}.leg.paid{background:#d5eae1;color:#114d3a}
+footer{font-size:.85rem;margin-top:22px}.error{color:#932b23}
+@media(max-width:520px){main{padding:26px 12px}.card{padding:15px}button{width:100%}}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <p class="eyebrow">Лабораторная работа · Оптимизация поездки</p>
+  <h1>Клин → Тверь</h1>
+  <p class="muted">М‑10, М‑11 и смешанный маршрут через развязку у Завидова.</p>
+</header>
+<form id="settings" class="card">
+  <h2>Условия поездки</h2>
+  <div class="fields">
+    <label>Выезд с, МСК<input name="start" type="time" value="07:30" required></label>
+    <label>Выезд до, МСК<input name="end" type="time" value="09:00" required></label>
+    <label>Прибыть до, МСК<input name="deadline" type="time"></label>
+    <label>Цена топлива, ₽/л<input name="price" type="number" min="0.01" max="1000" step="0.01" value="65" required></label>
+    <label>Оценка времени, ₽/ч<input name="valueOfTime" type="number" min="0" max="10000" step="1" value="400" required></label>
+    <label>Цель<select name="objective">
+      <option value="cost">Минимум расходов</option>
+      <option value="fuel">Минимум топлива</option>
+      <option value="duration">Минимум времени в пути</option>
+      <option value="score">Расходы с оценкой времени</option>
+    </select></label>
+  </div>
+  <button type="submit">Рассчитать</button>
+  <p id="error" class="error" role="alert" hidden></p>
+  <small>Учебный сценарий для понедельника — четверга. Шаг поиска 15 минут от начала окна. Конец окна также проверяется.</small>
+</form>
+<section id="recommendation" class="card result" aria-live="polite"></section>
+<section class="card">
+  <h2>Сравнение трёх маршрутов</h2>
+  <p id="caption" class="muted"></p>
+  <div class="scroll"><table>
+    <thead><tr><th>Маршрут</th><th>Выезд</th><th>Прибытие</th><th>В пути, мин</th><th>Км</th><th>Топливо, л</th><th>Топливо, ₽</th><th>Дорога, ₽</th><th>Итого, ₽</th><th>С оценкой времени, ₽</th></tr></thead>
+    <tbody id="comparison"></tbody>
+  </table></div>
+  <div id="legs"></div>
+</section>
+<details class="card">
+  <summary>Расчёты для всех проверенных выездов</summary>
+  <div class="scroll"><table>
+    <thead><tr><th>Маршрут</th><th>Выезд</th><th>Прибытие</th><th>В пути, мин</th><th>Км</th><th>Топливо, л</th><th>Топливо, ₽</th><th>Дорога, ₽</th><th>Итого, ₽</th><th>С оценкой времени, ₽</th></tr></thead>
+    <tbody id="all-trips"></tbody>
+  </table></div>
+</details>
+<footer class="muted">
+  Расчёт использует сценарные скорости, задержки и профиль дороги.
+  <a href="https://github.com/tokarevakate/vehicle-route/blob/main/webapp/consumption_model.py">Модель ТС</a> ·
+  <a href="https://avtodor-tr.ru/upload/iblock/613/eqvqrtjua5p4qquk3n94k9e8g0jdhvq1.pdf">Таблица тарифов сценария</a> ·
+  <a href="https://unitoll.ru/roads/m-11/objects_m11/traffic_junctions/">Развязки М‑11</a>
+</footer>
+</main>
+<script>
+"use strict";
+
+const number = (value, digits = 0) => value.toLocaleString("ru-RU", {
+  minimumFractionDigits: digits, maximumFractionDigits: digits
+});
+function renderRows(id, trips, best) {
+  const body = document.getElementById(id);
+  body.replaceChildren(...trips.map(trip => {
+    const row = document.createElement("tr");
+    row.className = trip === best ? "best" : trip.feasible ? "" : "late";
+    const values = [
+      trip.route.name + (trip.feasible ? "" : " · опоздание"), trip.departure,
+      trip.arrival, number(trip.duration, 1), number(trip.km), number(trip.fuel, 2),
+      number(trip.fuelCost, 2), number(trip.route.toll), number(trip.cost, 2), number(trip.score, 2)
+    ];
+    values.forEach((value, index) => {
+      const cell = document.createElement(index ? "td" : "th");
+      if (!index) cell.scope = "row";
+      cell.textContent = value;
+      row.append(cell);
+    });
+    return row;
+  }));
+}
+
+function render({trips, perRoute, best, earliest, legs: segments}) {
+  const selected = best === null ? null : trips[best];
+  const recommendation = document.getElementById("recommendation");
+  document.getElementById("caption").textContent =
+    "Для каждого маршрута показан лучший допустимый выезд по выбранной цели. При опоздании показано самое раннее прибытие.";
+  renderRows("comparison", perRoute.map(index => trips[index]), selected);
+  renderRows("all-trips", trips, selected);
+  document.getElementById("legs").replaceChildren();
+  if (!selected) {
+    recommendation.innerHTML = "<h2>Ни один маршрут не укладывается в срок</h2>"
+      + "<p>Самое раннее расчётное прибытие — " + earliest + ".</p>";
+    return;
+  }
+  recommendation.innerHTML = '<p class="eyebrow">Выбранный вариант · проверено ' + trips.length
+    + " комбинаций</p><h2>" + selected.route.name + " · выезд " + selected.departure
+    + "</h2><p>Прибытие " + selected.arrival + " · " + number(selected.duration, 1)
+    + " мин в пути · " + number(selected.fuel, 2) + " л · " + number(selected.cost, 2) + " ₽ расходов</p>";
+  const legs = document.createElement("div");
+  legs.className = "legs";
+  for (const segment of segments) {
+    const leg = document.createElement("span");
+    leg.className = segment.paid ? "leg paid" : "leg";
+    leg.textContent = segment.name + " · " + segment.km + " км";
+    legs.append(leg);
+  }
+  document.getElementById("legs").append(legs);
+}
+
+const form = document.getElementById("settings");
+const error = document.getElementById("error");
+
+const submit = form.querySelector("button[type=submit]");
+
+async function update() {
+  submit.disabled = true;
+  error.hidden = true;
+  try {
+    const query = new URLSearchParams(new FormData(form));
+    const response = await fetch("/api/plan?" + query);
+    const result = await response.json();
+    if (!response.ok) {
+      error.textContent = result.error;
+      error.hidden = false;
+      return;
+    }
+    render(result);
+  } catch {
+    error.textContent = "Нет связи с Python-сервером. Запустите route_planner.py и откройте адрес из Терминала.";
+    error.hidden = false;
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+form.addEventListener("submit", event => {
+  event.preventDefault();
+  update();
+});
+update();
+</script>
+</body>
+</html>
